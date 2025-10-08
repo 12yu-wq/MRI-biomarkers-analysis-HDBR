@@ -4,13 +4,12 @@ README for Multi-Variable Mixed Effects Model Analysis
 
 Project Description
 
-This repository contains R code for analyzing the effects of head-down bed rest (HDBR) on lower extremity muscle composition using MRI data and blood biomarkers. The analysis employs linear mixed-effects models (LMM) with unstructured (UN) covariance structure to account for repeated measurements. If UN is unable to construct a model then consider CAR1. Key Features
+This repository contains R code for analyzing the effects of head-down bed rest (HDBR) on lower extremity muscle composition using MRI data and blood biomarkers. The analysis employs linear mixed-effects models (LMM) with unstructured (UN) covariance structure to account for repeated measurements. If UN is unable to construct a model then consider CAR1. 
+Key Features
 
 * Multi-variable mixed effects modeling with UN covariance structure
 
 * Comprehensive model diagnostics including VIF and correlation analysis
-
-* Automated model comparison using AICc criteria
 
 * Publication-ready result tables and visualizations
 
