@@ -1,0 +1,259 @@
+#Multi variable mixed effects model (including UN structure)----------
+#Install necessary packages (remove comments before first run)
+# install.packages(c("nlme", "tidyverse", "car", "corrplot", "gtsummary", "emmeans", "broom.mixed"))
+#Set a new default save path
+setwd("D:/R data/suchu")
+getwd()
+
+# add-on package
+library(nlme)       # mixed effects model
+library(tidyverse)  # data manipulation
+library(car)        # variance analysis (math.)
+library(corrplot)   # Correlation matrix visualisation
+library(gtsummary)  # Three-wire meter output
+library(emmeans)    # Marginal effects analysis
+library(broom.mixed)# Collation of model results
+library(readxl)
+
+# 1. Data loading and pre-processing ---------------------------------------------------
+# Read the Excel file containing the missing values, note the change in the file path.
+raw_data <- read_excel("d:/R data/xueye2 xiaotui.xlsx", sheet = 1, na = c("", "NA"))
+
+# View the first few rows of the data
+head(raw_data)
+
+#  Data preprocessing ---------------------------------------------------
+analysis_data <- raw_data %>%
+  mutate(
+    time = as.numeric(time),  # Raw time value
+    ID = factor(subject),
+    # Addition of time and location variables
+    time_pos = as.integer(factor(time, levels = c(0,3,7,10,12)))
+  ) %>%
+  select(subject, time, time_pos, Ca, P, DR, ACTH, IPTH, CT, OC, OHD, 
+         MHMCSAR,GHMCSAR,MHMCSAL,GHMCSAL,CSATR,CSATL,MHIMATRFF,MHIMATLFF,GHIMATRFF,GHIMATLFF,CSATRFF,CSATLFF,CBMATRFF,CBMATLFF) %>%
+  na.omit() %>%
+  filter(time %in% c(0, 3, 7, 10, 12)) %>%
+  arrange(subject, time)  # Ensure time ordering
+
+# 2. Variable Definition ----------------------------------------------------------
+blood_vars <- c("Ca","P","DR","ACTH","IPTH","CT","OC","OHD")
+mri_var <-c("MHMCSAR","GHMCSAR","MHMCSAL","GHMCSAL","CSATR","CSATL","MHIMATRFF","MHIMATLFF","GHIMATRFF","GHIMATLFF","CSATRFF","CSATLFF","CBMATRFF","CBMATLF") 
+
+# 3. Covariance Diagnostics-----------------------------------------------
+fixed_vars <- c("time","Ca","P","DR","ACTH","IPTH","CT","OC","OHD")  # List of fixed-effects variables
+
+# Ensure that the data contains both dependent and independent variables
+vif_data <- analysis_data %>% 
+  select(MHMCSAR, all_of(fixed_vars)) %>%  
+  na.omit()
+
+# Calculating VIF
+vif_values <- lm(MHMCSAR ~ ., data = vif_data) %>% 
+  car::vif()
+
+# Convert to data frame
+vif_data <- data.frame(
+  Variable = names(vif_values),
+  VIF = as.numeric(vif_values)
+)
+
+
+# # Visualisation of VIF (bar charts)
+ggplot(vif_data, aes(x = Variable, y = VIF)) +
+  geom_col(fill = "#4E79A7", alpha = 0.8, width = 0.6) +
+  geom_hline(yintercept = c(5, 10), color = c("orange", "red"), 
+             linetype = "dashed", linewidth = 1) +
+  geom_text(aes(label = sprintf("%.1f", VIF)), vjust = -0.5, size = 4) +
+  labs(title = "Variance inflation factor diagnostics (VIF >5 needs attention, >10 severe covariance)",
+       x = NULL, y = "VIF") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid.major.x = element_blank())
+
+#Save VIF Chart
+ggsave("vif_diagnosis.png", width = 8, height = 5, dpi = 300)
+
+# Creating a stand-alone graphics device (solving the residual parameter problem)
+try(dev.off(), silent = TRUE) 
+plot.new() 
+par(mar = c(2, 2, 3, 2)) 
+
+# Calculate the correlation coefficient matrix
+cor_matrix <- cor(analysis_data[, blood_vars])
+
+# Generate optimised correlation matrix plot
+corrplot(
+  cor_matrix,
+  method = "number",       
+  type = "upper",          
+  number.cex = 0.6,        
+  tl.cex = 0.8,            
+  tl.srt = 45,             
+  title = "Correlation matrix of blood indicators",
+  diag = FALSE,            
+  addgrid.col = "lightgray" 
+)
+
+# Save high-resolution images (optional)
+dev.copy(png, 
+         filename = "corrplot.png",
+         width = 2400, 
+         height = 2000,
+         res = 300)
+dev.off()
+
+# 4. Definition of covariance structure (UN structure)----------------------------------
+cov_structures <- list(
+  UN = list(
+    corr = corSymm(form = ~ time_pos|subject),  
+    desc = "UN"
+  )
+)
+
+# 3. Model building (enhanced convergence)----------------------------------------
+models <- list()
+for (struct_name in names(cov_structures)) {
+  tryCatch({
+    struct <- cov_structures[[struct_name]]
+    cat("\nunder construction", struct$desc, "modelling...")
+    
+    models[[struct_name]] <- lme(
+      fixed = CBMATLFF ~ Ca + P + DR + ACTH + IPTH + CT + OC + OHD,
+      random = ~1|subject,
+      correlation = struct$corr,
+      control = lmeControl(
+        opt = "nlminb",
+        maxIter = 10000,       
+        msMaxIter = 10000,
+        tolerance = 1e-10,     # Improved convergence accuracy
+        sing.tol = 1e-30,
+        niterEM = 500),        # Add EM iterations
+      data = analysis_data
+    )
+    cat("Success!")
+  }, error = function(e) {
+    cat("\nfail to build：", e$message)
+  })
+}
+
+# 4. Model Comparison (with AICc Criteria)-------------------------------------
+model_comp <- map_dfr(names(models), ~{
+  if(!is.null(models[[.x]])) {
+    data.frame(
+      Modeltype = .x,
+      AIC = AIC(models[[.x]]),
+      AICc = AIC(models[[.x]], k = 2*nrow(analysis_data)/(nrow(analysis_data)-1)), 
+      BIC = BIC(models[[.x]]),
+      Number_of_parameters = sum(anova(models[[.x]])$"numDF"),
+      descriptions = cov_structures[[.x]]$desc
+    )
+  }
+}) %>% arrange(AICc)
+
+# 5. Presentation of results -----------------------------------------------------
+cat("\n---- Model comparison results (AICc prioritise) ----\n")
+print(model_comp %>% gt::gt())
+
+# Optimal model diagnosis
+best_model <- models[[model_comp$Modeltype[1]]]
+cat("\nBest Model Selection：", model_comp$descriptions[1], "\n")
+
+# Residual Diagnostic Graphs
+par(mfrow = c(2,2))
+dev.off()
+plot(best_model, main = paste("residual plot -", model_comp$descriptions[1]))
+par(mfrow = c(2,2), mar = c(4,4,2,1), cex = 0.8)
+qqPlot(resid(best_model), main = "Q-Q diagram")
+hist(resid(best_model), main = "residual distribution")
+plot(fitted(best_model), resid(best_model), main = "Residuals vs fitted values")
+qqnorm(residuals(best_model))        # normality test
+plot(ACF(best_model), alpha = 0.05)  # Check that the autocorrelation is within the confidence interval
+plot(best_model, resid(.) ~ fitted(.))  # variance chi-square test
+
+# 7. Presentation of results ----------------------------------------------------------
+
+# Extracting model fixed effects results
+sumry <- summary(best_model)
+fixed_effects <- sumry$tTable
+
+# Creating Formatted Data Boxes
+results_df <- data.frame(
+  variable = rownames(fixed_effects),
+  Estimate = sprintf("%.3f", fixed_effects[, "Value"]),
+  `Std.Error` = sprintf("%.3f", fixed_effects[, "Std.Error"]),
+  df = sprintf("%.1f", fixed_effects[, "DF"]),
+  `t.value` = sprintf("%.3f", fixed_effects[, "t-value"]),
+  `Pr(>|t|)` = ifelse(fixed_effects[, "p-value"] < 0.001, "<0.001",
+                      formatC(fixed_effects[, "p-value"], format = "f", digits = 3)),
+  significance = cut(fixed_effects[, "p-value"],
+            breaks = c(0, 0.001, 0.01, 0.05, 0.1, 1),
+            labels = c("***", "**", "*", ".", " "))
+)
+
+# Printing Formatted Tables
+cat("Fixed effects:\n")
+cat("---------------------------------------------------------------\n")
+cat(sprintf("%-12s %-10s %-10s %-6s %-8s %-10s %-4s\n",
+            "variable", "Estimate", "Std.Error", "df", "t.value", "Pr(>|t|)", "Sig."))
+cat("---------------------------------------------------------------\n")
+for(i in 1:nrow(results_df)){
+  cat(sprintf("%-12s %-10s %-10s %-6s %-8s %-10s %-4s\n",
+              results_df$variable[i],
+              results_df$Estimate[i],
+              results_df$Std.Error[i],
+              results_df$df[i],
+              results_df$t.value[i],
+              results_df$Pr...t..[i],
+              results_df$significance[i]))
+}
+cat("---------------------------------------------------------------\n")
+cat("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1\n")
+
+# Fixed effects visualisation
+fixef_plot <- best_model %>% 
+  tidy(effects = "fixed") %>%
+  filter(term != "(Intercept)") %>% 
+  mutate(
+    term = fct_reorder(term, estimate),
+    sig = ifelse(p.value < 0.05, "p<0.05", "NS")
+  ) %>% 
+  ggplot(aes(x = estimate, y = term, color = sig)) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  geom_pointrange(aes(xmin = estimate - 1.96*std.error,
+                      xmax = estimate + 1.96*std.error)) +
+  scale_color_manual(values = c("p<0.05" = "red", "NS" = "grey50")) +
+  labs(x = "Effect Size (95% CI)", y = "Predictors", 
+       title = "Fixed Effects Estimates", color = "Significance")
+print(fixef_plot)
+
+
+library(flextable)
+full_model_table <- best_model %>%
+  tidy(conf.int = TRUE) %>%
+  mutate(across(where(is.numeric), ~round(., 3))) %>%
+  flextable() %>%
+  set_header_labels(
+    term = "variable",
+    estimate = "estimated value",
+    std.error = "standard error",
+    statistic = "t",
+    p.value = "p",
+    conf.low = "95%CI_lower_limit",
+    conf.high = "95%CI_upper_limit"
+  ) %>%
+  align(align = "center", part = "all") %>%
+  autofit()
+
+save_as_docx(full_model_table, path = "best_model_results CBMATLFF xueye2.docx")
+
+
+
+# View model convergence information
+best_model$apVar  # should be a positive definite matrix
+best_model$numIter
+
+
+# If a "Non-positive definite" warning appears, the model needs to be simplified.
+# Example: removing non-significant variables                                                                          
+best_model <- update(best_model, . ~ . - CT)
